@@ -1,30 +1,20 @@
 import numpy as np
 import math as m
 
-import numpy as np
-#from numba import jitclass          # import the decorator
-#from numba import int32, float32    # import the types
-
-#spec = [        
-#    ('Ndims',  int32),
-#    ('Nbeads', int32),       
-#]
-
-#@jitclass(spec)
 class polymer:
     """A class which defines a simple bead-spring model of a freely jointed 
        polymer chain."""
 
-    Ndims  = 3
-    Nbeads =  10
+    Ndims  = 3    # Number of dimensions 
+    Nbeads =  10  # Number of beads
 
-    r0 = 0.7  # Equilibrium bead-bead bond distance
-    K  = 40   # FENE spring constant
-    R  = 0.3  # Maximum deviation from r0
+    _r0 = 0.7  # Equilibrium bead-bead bond distance
+    _K  = 40   # FENE spring constant
+    _R  = 0.3  # Maximum deviation from r0
 
-    epsilon = 1.0                   # Lennard-Jones energy parameter
-    sigma   = r0/(2.0**(1.0/6.0))   # Lennard-Jones sigma  parameter
-    rc      = 2.5*sigma             # Lennard-Jones cutoff
+    _epsilon = 1.0                    # Lennard-Jones energy parameter
+    _sigma   = _r0/(2.0**(1.0/6.0))   # Lennard-Jones sigma  parameter
+    _rc      = 2.5*_sigma             # Lennard-Jones cutoff
 
     def __init__(self, Ndims, Nbeads):
         "Constructor for class. Takes number of dimensions and number of beads as input"
@@ -38,17 +28,17 @@ class polymer:
         xpos = 0.0
         for pos in self.rpos:
             pos[0,] = xpos
-            xpos += self.r0
+            xpos += self._r0
 
         # Precompute boring constants that don't change
-        self.sigma6  = self.sigma**6
-        self.sigma12 = self.sigma6**2
-        ir6 = 1.0/self.rc**6
+        self._sigma6  = self._sigma**6
+        self._sigma12 = self._sigma6**2
+        ir6 = 1.0/self._rc**6
         ir12 = ir6*ir6
-        self.ljshift   = 4*self.epsilon*( ir12*self.sigma12 - ir6*self.sigma6 )
+        self._ljshift   = 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 )
 
-        self.invR = 1.0/self.R
-        self.fenefactor = -0.5*self.K*self.R**2
+        self._invR = 1.0/self._R
+        self._fenefactor = -0.5*self._K*self._R**2
 
         self.total_energy = self.energy() 
 
@@ -56,21 +46,21 @@ class polymer:
     def LJ_nb(self,r):
         "Compute truncated and shifted Lennard-Jones potential  "
 
-        if r < self.rc:
+        if r < self._rc:
             ir6 = 1.0/r**6
             ir12 = ir6*ir6
-            return 4*self.epsilon*( ir12*self.sigma12 - ir6*self.sigma6 ) - self.ljshift
+            return 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 ) - self._ljshift
         else:
             return 0.0
 
     def FENE(self,r):
         "Compute FENE bond stretch potential"    
 
-        arg = 1 - ((r-self.r0)*self.invR)**2
+        arg = 1 - ((r-self._r0)*self._invR)**2
         if arg <= 0.0:
             return 1E10 #np.finfo(np.float64).max
         else:
-            return self.fenefactor*m.log(arg)
+            return self._fenefactor*m.log(arg)
 
     def energy(self):
         "Compute total energy of the polymer chain"   
