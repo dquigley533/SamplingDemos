@@ -14,7 +14,7 @@ class polymer:
 
     _epsilon = 1.0                    # Lennard-Jones energy parameter
     _sigma   = _r0/(2.0**(1.0/6.0))   # Lennard-Jones sigma  parameter
-    _rc      = 2.5*_sigma             # Lennard-Jones cutoff
+    #_rc      = 2.5*_sigma             # Lennard-Jones cutoff
 
     def __init__(self, Ndims, Nbeads):
         "Constructor for class. Takes number of dimensions and number of beads as input"
@@ -22,7 +22,9 @@ class polymer:
         self.Ndims  = Ndims    # Number of dimensions
         self.Nbeads = Nbeads   # Set number of beads
        
-        self.rpos = np.zeros((Nbeads, Ndims)) # Create array of positions
+        self.rpos = np.zeros((Nbeads, Ndims))   # Create array of positions
+        self.vels = np.zeros((Nbeads, Ndims))   # Create array of velocities
+        self.forces = np.zeros((Nbeads, Ndims)) # Create array of forces
 
         # Initialise as a linear chain along the first dimension with equilibrium bond length
         xpos = 0.0
@@ -33,25 +35,26 @@ class polymer:
         # Precompute boring constants that don't change
         self._sigma6  = self._sigma**6
         self._sigma12 = self._sigma6**2
-        ir6 = 1.0/self._rc**6
-        ir12 = ir6*ir6
-        self._ljshift   = 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 )
+        #ir6 = 1.0/self._rc**6
+        #ir12 = ir6*ir6
+        #self._ljshift   = 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 )
 
         self._invR = 1.0/self._R
         self._fenefactor = -0.5*self._K*self._R**2
 
         self.total_energy = self.energy() 
+        self.compute_forces()
 
 
     def LJ_nb(self,r):
-        "Compute truncated and shifted Lennard-Jones potential  "
+        "Compute Lennard-Jones potential for non-bonded interactions"
 
-        if r < self._rc:
-            ir6 = 1.0/r**6
-            ir12 = ir6*ir6
-            return 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 ) - self._ljshift
-        else:
-            return 0.0
+        #if r < self._rc:
+        ir6 = 1.0/r**6
+        ir12 = ir6*ir6
+        return 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 ) #- self._ljshift
+        #else:
+        #    return 0.0
 
     def FENE(self,r):
         "Compute FENE bond stretch potential"    
@@ -92,33 +95,177 @@ class polymer:
 
         # Bonded energy from FENE springs
         bond_energy = 0.0
+
+        normfunc = np.linalg.norm
         
         if (ibead < self.Nbeads-1):
             rvect = self.rpos[ibead+1] - self.rpos[ibead]
-            rmag  = np.linalg.norm(rvect)
+            rmag  = normfunc(rvect)
             bond_energy = bond_energy + self.FENE(rmag)
 
         if (ibead > 0):
             rvect = self.rpos[ibead-1] - self.rpos[ibead]
-            rmag  = np.linalg.norm(rvect)
+            rmag  = normfunc(rvect)
             bond_energy = bond_energy + self.FENE(rmag)
 
         # Non-bonded energy from LJ interactions
         nb_energy = 0.0
         for jbead in range(0, ibead-1):
             rvect = self.rpos[ibead] - self.rpos[jbead]
-            rmag  = np.linalg.norm(rvect)
+            rmag  = normfunc(rvect)
             nb_energy = nb_energy + self.LJ_nb(rmag)
 
         for jbead in range(ibead+2, self.Nbeads):
             rvect = self.rpos[ibead] - self.rpos[jbead]
-            rmag  = np.linalg.norm(rvect)
+            rmag  = normfunc(rvect)
             nb_energy = nb_energy + self.LJ_nb(rmag)
 
         return bond_energy + nb_energy
+
+    def force_on_bead(self, ibead):
+        """Compute total force vector acting on bead `ibead`.
+
+        Returns a numpy array of length `Ndims` with the force contributions
+        from bonded FENE springs (neighbours ibead-1 and ibead+1) and
+        non-bonded Lennard-Jones interactions with all other beads excluding
+        immediate bonded neighbours.
+
+        Edge cases:
+        - If a pair distance r is zero, that pair is skipped to avoid
+          division-by-zero. Very small denominators in the FENE expression
+          are clipped to a small value to avoid numerical overflow.
+        """
+        # initialize force vector
+        f = np.zeros(self.Ndims)
+
+        # small cutoff to prevent division by zero
+        tiny = 1e-12
+
+        # Bonded neighbours (FENE)
+        if ibead < self.Nbeads - 1:
+            # neighbour i+1
+            rvect = self.rpos[ibead] - self.rpos[ibead+1]
+            r = np.linalg.norm(rvect)
+            if r > tiny:
+                arg = 1 - ((r - self._r0) * self._invR)**2
+                # avoid division by zero / negative argument
+                denom = arg if arg > tiny else tiny
+                # dU/dr for FENE = K*(r - r0)/arg  -> force = -dU/dr * r_hat
+                fmag = - self._K * (r - self._r0) / denom
+                f += fmag * (rvect / r)
+
+        if ibead > 0:
+            # neighbour i-1
+            rvect = self.rpos[ibead] - self.rpos[ibead-1]
+            r = np.linalg.norm(rvect)
+            if r > tiny:
+                arg = 1 - ((r - self._r0) * self._invR)**2
+                denom = arg if arg > tiny else tiny
+                fmag = - self._K * (r - self._r0) / denom
+                f += fmag * (rvect / r)
+
+        # Non-bonded LJ interactions (exclude immediate bonded neighbours)
+        # j in [0, ibead-2] and [ibead+2, Nbeads-1]
+        for jbead in range(0, ibead-1):
+            rvect = self.rpos[ibead] - self.rpos[jbead]
+            r = np.linalg.norm(rvect)
+            if r > tiny:
+                ir6 = 1.0 / r**6
+                ir12 = ir6 * ir6
+                # dU/dr for LJ (with sigma factors included)
+                dUdr = 4.0 * self._epsilon * ( -12.0 * ir12 * self._sigma12 / r
+                                                + 6.0 * ir6 * self._sigma6 / r )
+                # force is -dU/dr * r_hat
+                f += -dUdr * (rvect / r)
+
+        for jbead in range(ibead+2, self.Nbeads):
+            rvect = self.rpos[ibead] - self.rpos[jbead]
+            r = np.linalg.norm(rvect)
+            if r > tiny:
+                ir6 = 1.0 / r**6
+                ir12 = ir6 * ir6
+                dUdr = 4.0 * self._epsilon * ( -12.0 * ir12 * self._sigma12 / r
+                                                + 6.0 * ir6 * self._sigma6 / r )
+                f += -dUdr * (rvect / r)
+
+        return f
+
+    def compute_forces(self):
+        """Compute forces for all beads and return an array of shape (Nbeads, Ndims).
+
+        Vectorized O(N^2) implementation that computes pairwise displacement
+        arrays and accumulates bonded (FENE) and non-bonded (LJ) forces.
+        """
+        pos = self.rpos  # (N, D)
+        N = self.Nbeads
+        allf = np.zeros((N, self.Ndims))
+
+        # pairwise displacement: r_i - r_j (N, N, D)
+        rij = pos[:, None, :] - pos[None, :, :]
+        r = np.linalg.norm(rij, axis=2)  # (N, N)
+        tiny = 1e-12
+
+        # Non-bonded LJ interactions: pairs with |i-j| >= 2
+        idx = np.arange(N)
+        diff = np.abs(idx[:, None] - idx[None, :])
+        mask_nb = diff >= 2
+
+        iu, ju = np.where(np.triu(mask_nb, k=1))
+        if iu.size > 0:
+            rv = rij[iu, ju, :]
+            rpair = np.linalg.norm(rv, axis=1)
+            valid = rpair > tiny
+            if np.any(valid):
+                rvv = rv[valid]
+                rvec = rpair[valid]
+                ir6 = 1.0 / (rvec**6)
+                ir12 = ir6 * ir6
+                # dU/dr for LJ: 4*epsilon*( -12*sigma12/r^13 + 6*sigma6/r^7 )
+                dUdr = 4.0 * self._epsilon * ( -12.0 * ir12 * self._sigma12 / rvec
+                                               + 6.0 * ir6 * self._sigma6 / rvec )
+                # force on i from j: -dU/dr * r_hat
+                fij = (-dUdr)[:, None] * (rvv / rvec[:, None])
+                # accumulate forces (i gets +fij, j gets -fij)
+                valid_idx_i = iu[valid]
+                valid_idx_j = ju[valid]
+                np.add.at(allf, valid_idx_i, fij)
+                np.add.at(allf, valid_idx_j, -fij)
+
+        # Bonded FENE interactions: only neighbouring pairs (i, i+1)
+        if N > 1:
+            iu = np.arange(0, N-1)
+            ju = iu + 1
+            rv = rij[iu, ju, :]
+            rpair = np.linalg.norm(rv, axis=1)
+            valid = rpair > tiny
+            if np.any(valid):
+                rvv = rv[valid]
+                rvec = rpair[valid]
+                arg = 1 - ((rvec - self._r0) * self._invR)**2
+                denom = np.where(arg > tiny, arg, tiny)
+                # dU/dr for FENE = -K*(r - r0)/arg  -> force = -dU/dr * r_hat
+                fmag = - self._K * (rvec - self._r0) / denom
+                fij = fmag[:, None] * (rvv / rvec[:, None])
+                valid_idx_i = iu[valid]
+                valid_idx_j = ju[valid]
+                np.add.at(allf, valid_idx_i, fij)
+                np.add.at(allf, valid_idx_j, -fij)
+
+        self.forces = allf
+        return 
 
     def end2end(self):
         "End to end distance of the polymer chain"
 
         rvect = self.rpos[self.Nbeads-1] - self.rpos[0]
         return np.linalg.norm(rvect)
+
+    def kinetic_energy(self):
+        "Compute total kinetic energy of the polymer chain"
+
+        ke = 0.0
+        for ibead in range(0,self.Nbeads):
+            vmag2 = np.dot(self.vels[ibead], self.vels[ibead])
+            ke = ke + 0.5*vmag2
+
+        return ke
