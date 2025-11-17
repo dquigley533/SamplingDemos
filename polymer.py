@@ -56,6 +56,14 @@ class polymer:
         #else:
         #    return 0.0
 
+    def LJ_nb_fast(self,rsq):
+        "Compute Lennard-Jones potential for non-bonded interactions given r squared"
+
+        #if r < self._rc:
+        ir6 = 1.0/rsq**3
+        ir12 = ir6*ir6
+        return 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 ) #- self._ljshift
+
     def FENE(self,r):
         "Compute FENE bond stretch potential"    
 
@@ -63,7 +71,7 @@ class polymer:
         if arg <= 0.0:
             return 1E10 #np.finfo(np.float64).max
         else:
-            return self._fenefactor*m.log(arg)
+            return self._fenefactor*np.log(arg)
 
     def energy(self):
         "Compute total energy of the polymer chain"   
@@ -80,15 +88,14 @@ class polymer:
         for ibead in range(0,self.Nbeads-2):
             for jbead in range(ibead+2,self.Nbeads): 
                 rvect = self.rpos[ibead] - self.rpos[jbead]
-                rmag  = np.linalg.norm(rvect)
-
-                nb_energy = nb_energy + self.LJ_nb(rmag)
+                #rmag  = np.linalg.norm(rvect)
+                rsq   = np.dot(rvect,rvect)
+                nb_energy = nb_energy + self.LJ_nb_fast(rsq)
 
         self.total_energy = nb_energy + bond_energy
 
 
         return self.total_energy
-
 
     def local_energy(self,ibead):
         "Computes all contributions to the energy involving ibead"
@@ -96,29 +103,32 @@ class polymer:
         # Bonded energy from FENE springs
         bond_energy = 0.0
 
-        normfunc = np.linalg.norm
+        #sqrtfunc = np.linalg.norm
+        #dotfunc  = np.dot
         
         if (ibead < self.Nbeads-1):
             rvect = self.rpos[ibead+1] - self.rpos[ibead]
-            rmag  = normfunc(rvect)
+            rmag  = np.sqrt(np.dot(rvect,rvect))
             bond_energy = bond_energy + self.FENE(rmag)
 
         if (ibead > 0):
             rvect = self.rpos[ibead-1] - self.rpos[ibead]
-            rmag  = normfunc(rvect)
+            rmag  = np.sqrt(np.dot(rvect,rvect))
             bond_energy = bond_energy + self.FENE(rmag)
 
         # Non-bonded energy from LJ interactions
         nb_energy = 0.0
         for jbead in range(0, ibead-1):
             rvect = self.rpos[ibead] - self.rpos[jbead]
-            rmag  = normfunc(rvect)
-            nb_energy = nb_energy + self.LJ_nb(rmag)
+            #rmag  = normfunc(rvect)
+            rsq   = np.dot(rvect,rvect)
+            nb_energy = nb_energy + self.LJ_nb_fast(rsq)
 
         for jbead in range(ibead+2, self.Nbeads):
             rvect = self.rpos[ibead] - self.rpos[jbead]
-            rmag  = normfunc(rvect)
-            nb_energy = nb_energy + self.LJ_nb(rmag)
+            #rmag  = normfunc(rvect)
+            rsq   = np.dot(rvect,rvect)
+            nb_energy = nb_energy + self.LJ_nb_fast(rsq)
 
         return bond_energy + nb_energy
 
@@ -269,3 +279,108 @@ class polymer:
             ke = ke + 0.5*vmag2
 
         return ke
+    
+    def lj6(self, r):
+        "LJ6 potential energy function"
+        
+        ir6 = 1.0/r**6
+        U =  4*self._epsilon*( - ir6*self._sigma6 ) 
+
+        return U
+    
+    def lj12(self, r):
+        "LJ12 potential energy function"
+        
+        ir12 = 1.0/r**12
+        U =  4*self._epsilon*( ir12*self._sigma12 ) 
+
+        return U
+
+
+    def lj6_inv(self, U):
+        "Inverse function for LJ6 potential energy"
+        
+        # If U = 4 epsilon ( - sigma6/r6 ), then
+        # r6 = - 4 epsilon sigma6 / U
+        r6 = - 4 * self._epsilon * self._sigma6 / U
+        r = r6**(1.0/6.0)
+
+        return r
+
+    def lj12_inv(self, U):
+        "Inverse function for LJ12 potential energy"
+        
+        # If U = 4 epsilon ( sigma12/r12 ), then
+        # r12 = 4 epsilon sigma12 / U
+        r12 = 4 * self._epsilon * self._sigma12 / U
+        r = r12**(1.0/12.0)
+
+        return r
+        
+        
+
+    def lj6_time(self, imove, isource, vel, max_delta_U):
+
+        # Vector from moving bead to source bead
+        rsep = self.rpos[isource] - self.rpos[imove]
+
+        # If there's positive projection of sep onto vel, return NULL
+        # as imove is moving toward source bead or perpendicular
+        vdot = np.dot(rsep, vel)  
+        if (vdot >= 0.0):
+            return None
+
+        # Distance squared between moved bead and source bead
+        rsq = np.dot(rsep, rsep)
+        r  = np.sqrt(rsq)
+
+        # Unit vector along rsep
+        rhat = rsep / r
+
+        # Current lj6 energy
+        U0 = self.lj6(r)
+
+        # Separation at which collision would occur        
+        rcoll = self.lj6_inv(U0 + max_delta_U)
+
+        # Distance along rsep vector to collision point
+        dist = rcoll - r
+
+        # So now we have (vel*tcoll) dot rhat = dist
+        # and time to collision is
+        tcoll = dist / (np.dot(vel, rhat))
+
+        return tcoll
+    
+    def lj12_time(self, imove, isource, vel, max_delta_U):
+
+        # Vector from moving bead to source bead
+        rsep = self.rpos[isource] - self.rpos[imove]
+
+        # If there's negative projection of sep onto vel, return NULL
+        # as imove is moving away from source bead or perpendicular
+        vdot = np.dot(rsep, vel)  
+        if (vdot <= 0.0):
+            return None
+
+        # Distance squared between moved bead and source bead
+        rsq = np.dot(rsep, rsep)
+        r = np.sqrt(rsq)
+
+        # Unit vector along rsep
+        rhat = rsep / r
+
+        # Current lj12 energy
+        U0 = self.lj12(r)
+
+        # Separation at which collision would occur        
+        rcoll = self.lj12_inv(U0 + max_delta_U)
+
+        # Distance along rsep vector to collision point
+        dist = r - rcoll
+
+        # So now we have (vel*tcoll) dot rhat = dist
+        # and time to collision is
+        tcoll = dist / (np.dot(vel, rhat))
+
+        return tcoll
