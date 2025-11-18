@@ -14,7 +14,7 @@ class polymer:
 
     _epsilon = 1.0                    # Lennard-Jones energy parameter
     _sigma   = _r0/(2.0**(1.0/6.0))   # Lennard-Jones sigma  parameter
-    #_rc      = 2.5*_sigma             # Lennard-Jones cutoff
+    #_rc      = 2.5*_sigma            # Lennard-Jones cutoff
 
     def __init__(self, Ndims, Nbeads):
         "Constructor for class. Takes number of dimensions and number of beads as input"
@@ -38,6 +38,8 @@ class polymer:
         #ir6 = 1.0/self._rc**6
         #ir12 = ir6*ir6
         #self._ljshift   = 4*self._epsilon*( ir12*self._sigma12 - ir6*self._sigma6 )
+
+        self._ljrmin = self._sigma*2.0**(1.0/6.0)
 
         self._invR = 1.0/self._R
         self._fenefactor = -0.5*self._K*self._R**2
@@ -316,10 +318,178 @@ class polymer:
         r = r12**(1.0/12.0)
 
         return r
+    
+
+    def lj_inv(self, U, sign):
+        "Inverse function for LJ potential energy"
         
+        # If U = 4 epsilon ( sigma12/r12 - sigma6/r6 ), then
+        # Rearranging gives a quadratic in r6:
+        # (4 epsilon sigma12) - (U r6) - (4 epsilon sigma6 r6^2) = 0
+        # Solving using quadratic formula:
+
+        # Sanity check for U
+        if (U > 0.0) and (sign < 0.0):
+            return np.inf # Can never reach positive U if moving apart
+ 
+        if sign <= 0.0:
+            num = -1 - np.sqrt(1+U/self._epsilon)
+        else:
+            num = -1 + np.sqrt(1+U/self._epsilon)
+
+        denom = 0.5*U/self._epsilon
+
+        r = self._sigma * (num/denom)**(1.0/6.0)
+
+        return r
+    
+    def lj_time(self, imove, isource, vel, max_delta_U):
+        '''Compute time to collision for the full LJ potential'''
+
+        # Vector from moving bead to source bead
+        rsep = self.rpos[isource] - self.rpos[imove]
+
+        # Distance squared between moved bead and source bead
+        rsq = np.dot(rsep, rsep)
+        r  = np.sqrt(rsq)
+
+        # Unit vector along rsep
+        rhat = rsep / r
+
+        # Initialise distance we can move along the "bond"
+        dist = 0.0
+
+        # If there's positive projection of rsep onto vel, 
+        # the "bond" is getting shorter.
+        vdot = np.dot(rsep, vel)  
+        if (vdot >= 0.0):
+            # If the "bond" is currently stretched beyond ljrmin,
+            # we can move at least (r-ljrmin) along the "bond" and
+            # restart calculation from ljrmin.
+            if (r-self._ljrmin) > 0.0:
+                #print("Moving to ljrmin from beyond minimum")
+                dist += r-self._ljrmin
+                rsep = self._ljrmin * rhat
+                r = self._ljrmin
+                rsq = r*r
+
+        # Otherwise the "bond" is getting longer
+        else:
+            # If the "bond" is currently compressed below ljrmin,
+            # we can move at least (rljrmin-r) along the bond and
+            # restart calculation from ljrmin.
+            if (self._ljrmin - r) > 0.0:
+                #print("Moving to ljrmin from within minimum")
+                dist += self._ljrmin - r
+                rsep = self._ljrmin * rhat
+                r = self._ljrmin
+                rsq = r*r
+
+        #print(f"After adjusting r = {r}, dist = {dist}")
+
+        # Current LJ energy (will be -epsilon if we've moved to minimum)
+        U0 = self.LJ_nb(r)
+
+        # Separation at which collision would occur
+        rcoll = self.lj_inv(U0 + max_delta_U, sign=np.sign(vdot))
+
+        #print(f"rcoll = {rcoll}")
+
+        # Add distance along rsep vector to collision point
+        dist += abs(rcoll - r)
+
+        #print(f"Total dist to collision = {dist}")
+
+        # So now we have (vel*tcoll) dot rhat = dist
+        # and time to collision is
+        tcoll = dist / abs(np.dot(vel, rhat))
+
+        return tcoll        
+
+    
+    def fene_inv(self, U, sign):
+        "Inverse function for FENE potential energy"
+        
+        # If U = -0.5 K R^2 ln( 1 - ((r - r0)/R)^2 ), then
+        # exp( -2 U / (K R^2) ) = 1 - ((r - r0)/R)^2
+        # ((r - r0)/R)^2 = 1 - exp( -2 U / (K R^2) )
+        # (r - r0)/R = +/- sqrt( 1 - exp( -2 U / (K R^2) ) )
+        # r = r0 +/- R * sqrt( 1 - exp( -2 U / (K R^2) ) )
+        
+        expterm = np.exp( -2.0 * U / (self._K * self._R**2) )
+        sqrtterm = np.sqrt( 1.0 - expterm )
+
+        if sign <= 0.0:
+            r = self._r0 - self._R * sqrtterm
+        else:
+            r = self._r0 + self._R * sqrtterm
+
+        return r
+        
+    def fene_time(self, imove, isource, vel, max_delta_U):
+        '''Compute time to collision for the FENE potential'''
+
+        # Vector from moving bead to source bead
+        rsep = self.rpos[isource] - self.rpos[imove]
+
+        # Distance squared between moved bead and source bead
+        rsq = np.dot(rsep, rsep)
+        r  = np.sqrt(rsq)
+
+        # Unit vector along rsep
+        rhat = rsep / r
+
+        # Initialise distance we can move along the bond
+        dist = 0.0
+
+        # If there's positive projection of rsep onto vel, 
+        # the bond is getting shorter.
+        vdot = np.dot(rsep, vel)  
+        if (vdot >= 0.0):
+            # If the bond is currently stretched beyond r0,
+            # we can move at least (r-r0) along the bond and
+            # restart calculation from r0.
+            if (r-self._r0) > 0.0:
+                dist += r-self._r0
+                rsep = self._r0 * rhat
+                r = self._r0
+                rsq = r*r
+
+        # Otherwise the bond is getting longer
+        else:
+            # If the bond is currently compressed below r0,
+            # we can move at least (r0-r) along the bond and
+            # restart calculation from r0.
+            if (self._r0 - r) > 0.0:
+                dist += self._r0 - r
+                rsep = self._r0 * rhat
+                r = self._r0
+                rsq = r*r
+
+        #print(f"After adjusting r = {r}, dist = {dist}")
+
+        # Current FENE energy (will be zero if we've moved to r0 already)
+        U0 = self.FENE(r)
+
+        # Separation at which collision would occur
+        rcoll = self.fene_inv(U0 + max_delta_U, sign=-1*np.sign(vdot))
+
+        #print(f"rcoll = {rcoll}")
+
+        # Add distance along rsep vector to collision point
+        dist += abs(rcoll - r)
+
+        #print(f"Total dist to collision = {dist}")
+
+        # So now we have (vel*tcoll) dot rhat = dist
+        # and time to collision is
+        tcoll = dist / abs(np.dot(vel, rhat))
+
+        return tcoll
         
 
     def lj6_time(self, imove, isource, vel, max_delta_U):
+        '''Compute time to collision for the attractive LJ6 potential'''
 
         # Vector from moving bead to source bead
         rsep = self.rpos[isource] - self.rpos[imove]
@@ -353,6 +523,7 @@ class polymer:
         return tcoll
     
     def lj12_time(self, imove, isource, vel, max_delta_U):
+        '''Compute time to collision for the repulsive LJ12 potential'''
 
         # Vector from moving bead to source bead
         rsep = self.rpos[isource] - self.rpos[imove]
